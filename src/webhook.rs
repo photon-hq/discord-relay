@@ -33,6 +33,11 @@ const DEFAULT_MAX_ATTEMPTS: u32 = 4;
 /// Base delay for exponential backoff between retries.
 const DEFAULT_BACKOFF_BASE: Duration = Duration::from_millis(250);
 
+/// Upper bound on a single inter-retry sleep, including server-requested
+/// `Retry-After` waits. Caps a pathological header or a large tuned backoff so a
+/// delivery lane can't stall indefinitely (and the delay can't overflow).
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
 /// Base domain of the Fusor "super webhook" edge. Events are delivered to
 /// `https://{slug}.{domain}/{platform}`, where Fusor forwards them on to
 /// Spectrum. This is the only baked-in default — override per-environment via
@@ -75,9 +80,14 @@ pub enum WebhookError {
     /// The request could not be built, sent, or timed out at the transport
     /// layer (DNS, TLS, connection, read timeout, ...).
     Transport(reqwest::Error),
-    /// The downstream returned a non-success status. Carries the status and a
-    /// best-effort snippet of the response body for diagnostics.
-    Status { status: StatusCode, body: String },
+    /// The downstream returned a non-success status. Carries the status, a
+    /// best-effort snippet of the response body for diagnostics, and any
+    /// server-requested `Retry-After` delay (present on `429`).
+    Status {
+        status: StatusCode,
+        body: String,
+        retry_after: Option<Duration>,
+    },
 }
 
 impl std::fmt::Display for WebhookError {
@@ -85,7 +95,7 @@ impl std::fmt::Display for WebhookError {
         match self {
             WebhookError::InvalidUrl(e) => write!(f, "invalid webhook url: {e}"),
             WebhookError::Transport(e) => write!(f, "transport error: {e}"),
-            WebhookError::Status { status, body } => {
+            WebhookError::Status { status, body, .. } => {
                 write!(f, "downstream returned {status}: {body}")
             }
         }
@@ -222,27 +232,34 @@ impl WebhookClient {
     /// returned immediately, since retrying a malformed/unauthorized request
     /// won't help.
     ///
-    /// On success returns the number of attempts made (1 means it succeeded on
-    /// the first try), which the caller can use to record retry metrics.
+    /// Always returns the number of attempts made (1 means it succeeded — or
+    /// failed permanently — on the first try) alongside the outcome, so the
+    /// caller can record retry metrics on both success and failure.
     pub async fn forward<T: Serialize + ?Sized>(
         &self,
         event: &str,
         payload: &T,
-    ) -> Result<u32, WebhookError> {
+    ) -> (u32, Result<(), WebhookError>) {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let result = self.send_once(event, payload).await;
-
-            match result {
-                Ok(()) => return Ok(attempt),
+            match self.send_once(event, payload).await {
+                Ok(()) => return (attempt, Ok(())),
                 Err(err) => {
-                    let retryable = is_retryable(&err);
-                    if !retryable || attempt >= self.max_attempts {
-                        return Err(err);
+                    if !is_retryable(&err) || attempt >= self.max_attempts {
+                        return (attempt, Err(err));
                     }
-                    // Exponential backoff: base * 2^(attempt-1).
-                    let delay = self.backoff_base * 2u32.saturating_pow(attempt - 1);
+                    // Honour a server-requested `Retry-After` (429); otherwise
+                    // exponential backoff (base * 2^(attempt-1)). Both are capped
+                    // so a lane can't stall and the delay can't overflow.
+                    let delay = match &err {
+                        WebhookError::Status {
+                            retry_after: Some(after),
+                            ..
+                        } => *after,
+                        _ => self.backoff_base * 2u32.saturating_pow(attempt - 1),
+                    }
+                    .min(MAX_RETRY_DELAY);
                     tokio::time::sleep(delay).await;
                 }
             }
@@ -270,6 +287,9 @@ impl WebhookClient {
             return Ok(());
         }
 
+        // Grab any Retry-After before consuming the response for its body.
+        let retry_after = parse_retry_after(response.headers());
+
         // Capture a bounded snippet of the body for diagnostics.
         let body = response
             .text()
@@ -277,8 +297,26 @@ impl WebhookClient {
             .map(|b| truncate(&b, 512))
             .unwrap_or_else(|_| "<unreadable body>".to_string());
 
-        Err(WebhookError::Status { status, body })
+        Err(WebhookError::Status {
+            status,
+            body,
+            retry_after,
+        })
     }
+}
+
+/// Parse a `Retry-After` header expressed in whole seconds. The HTTP-date form
+/// is not handled (downstreams send delta-seconds); a missing or unparseable
+/// header yields `None`, falling back to exponential backoff.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let secs: u64 = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(secs))
 }
 
 /// Decide whether an error is worth retrying.
@@ -355,6 +393,7 @@ mod tests {
         let err = WebhookError::Status {
             status: StatusCode::UNAUTHORIZED,
             body: String::new(),
+            retry_after: None,
         };
         assert!(!is_retryable(&err));
     }
@@ -364,10 +403,12 @@ mod tests {
         assert!(is_retryable(&WebhookError::Status {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             body: String::new(),
+            retry_after: None,
         }));
         assert!(is_retryable(&WebhookError::Status {
             status: StatusCode::TOO_MANY_REQUESTS,
             body: String::new(),
+            retry_after: None,
         }));
     }
 
@@ -376,6 +417,26 @@ mod tests {
         let s = "é".repeat(10); // 2 bytes each
         let out = truncate(&s, 5);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn parses_retry_after_seconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "5".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn ignores_missing_or_non_numeric_retry_after() {
+        assert_eq!(parse_retry_after(&reqwest::header::HeaderMap::new()), None);
+
+        // The HTTP-date form is intentionally not parsed.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2025 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(parse_retry_after(&headers), None);
     }
 
     #[test]

@@ -111,19 +111,21 @@ async fn worker(
     project_id: String,
 ) {
     while let Some(ForwardEvent { name, data }) = rx.recv().await {
-        debug!(lane, event = %name, payload = %data, "forwarding event downstream");
+        debug!(lane, event = %name, "forwarding event downstream");
         let start = Instant::now();
-        let result = webhook.forward(&name, &data).await;
+        let (attempts, result) = webhook.forward(&name, &data).await;
         metrics::forward_latency(&project_id, start.elapsed().as_secs_f64());
+        // Record retries on both outcomes: a failed forward performs the *most*
+        // retries, so only counting them on success inverts the metric.
+        metrics::forward_retries(&project_id, u64::from(attempts.saturating_sub(1)));
         match result {
-            Ok(attempts) => {
+            Ok(()) => {
                 metrics::event_forwarded(&project_id);
-                metrics::forward_retries(&project_id, u64::from(attempts.saturating_sub(1)));
                 debug!(lane, event = %name, attempts, "event forwarded downstream");
             }
             Err(err) => {
                 metrics::forward_failure(&project_id);
-                error!(lane, event = %name, error = %err, "forwarding event downstream failed");
+                error!(lane, event = %name, attempts, error = %err, "forwarding event downstream failed");
             }
         }
     }
