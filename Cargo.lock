@@ -184,7 +184,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "discord-middleman"
+name = "discord-relay"
 version = "0.1.0"
 dependencies = [
  "dotenvy",

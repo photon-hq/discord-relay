@@ -5,7 +5,7 @@
 //! machine-readable output without a code change or redeploy:
 //!
 //! * `RUST_LOG` — standard [`EnvFilter`] syntax, e.g. `info` or
-//!   `discord_middleman=debug,reqwest=warn`. Falls back to [`DEFAULT_FILTER`]
+//!   `discord_relay=debug,reqwest=warn`. Falls back to [`DEFAULT_FILTER`]
 //!   when unset or empty.
 //! * `LOG_FORMAT` — `json` emits one JSON object per line (ship these straight
 //!   to a log aggregator); anything else (or unset) emits human-readable lines,
@@ -21,7 +21,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// Filter applied when `RUST_LOG` is unset or empty. `info` everywhere keeps
 /// the signal-to-noise ratio sane out of the box; bump it per-target via
-/// `RUST_LOG` when debugging (e.g. `discord_middleman=debug`).
+/// `RUST_LOG` when debugging (e.g. `discord_relay=debug`).
 const DEFAULT_FILTER: &str = "info";
 
 /// Environment variable selecting the output encoding (`json` vs human).

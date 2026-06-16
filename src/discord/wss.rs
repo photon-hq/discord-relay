@@ -2,7 +2,7 @@
 //!
 //! One Discord bot maps to one [`spawn`] call, which drives a *supervisor*
 //! that keeps a gateway connection alive forever — reconnecting and resuming
-//! across drops so the middleman has effectively no downtime.
+//! across drops so the relay has effectively no downtime.
 //!
 //! ## Tasks, not threads
 //!
@@ -436,8 +436,8 @@ fn identify(token: &str) -> Value {
             "intents": INTENTS,
             "properties": {
                 "os": std::env::consts::OS,
-                "browser": "discord-middleman",
-                "device": "discord-middleman",
+                "browser": "discord-relay",
+                "device": "discord-relay",
             },
         },
     })

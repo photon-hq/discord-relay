@@ -3,7 +3,7 @@ use veil::Redact;
 
 /// Top-level configuration read from `config.json`.
 ///
-/// Holds one [`Client`] per Discord bot the middleman should drive:
+/// Holds one [`Client`] per Discord bot the relay should drive:
 /// ```json
 /// {
 ///   "bots": [
@@ -22,7 +22,7 @@ pub struct Config {
     pub bots: Vec<Client>,
 }
 
-/// Configuration for a single Discord bot the middleman drives.
+/// Configuration for a single Discord bot the relay drives.
 ///
 /// Mirrors one entry of the `bots` array documented in `docs/PAYLOAD.md`:
 /// ```json

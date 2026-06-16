@@ -30,20 +30,20 @@ use tracing::{error, info};
 const OTLP_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
 /// Logical service name reported as a resource attribute on every metric.
-const SERVICE_NAME: &str = "discord-middleman";
+const SERVICE_NAME: &str = "discord-relay";
 
 // Instrument names. OpenTelemetry uses dotted namespaces and derives the
 // monotonic `_total` suffix at export time, so unlike the old Prometheus names
 // these carry no `_total`. The latency series is a histogram in seconds.
-const EVENTS_RECEIVED: &str = "middleman.events.received";
-const EVENTS_FORWARDED: &str = "middleman.events.forwarded";
-const EVENTS_DROPPED: &str = "middleman.events.dropped";
-const FORWARD_FAILURES: &str = "middleman.forward.failures";
-const FORWARD_RETRIES: &str = "middleman.forward.retries";
-const FORWARD_LATENCY: &str = "middleman.forward.latency";
-const GATEWAY_RECONNECTS: &str = "middleman.gateway.reconnects";
-const GATEWAY_RESUMES: &str = "middleman.gateway.resumes";
-const ACTIVE_BOTS: &str = "middleman.active_bots";
+const EVENTS_RECEIVED: &str = "relay.events.received";
+const EVENTS_FORWARDED: &str = "relay.events.forwarded";
+const EVENTS_DROPPED: &str = "relay.events.dropped";
+const FORWARD_FAILURES: &str = "relay.forward.failures";
+const FORWARD_RETRIES: &str = "relay.forward.retries";
+const FORWARD_LATENCY: &str = "relay.forward.latency";
+const GATEWAY_RECONNECTS: &str = "relay.gateway.reconnects";
+const GATEWAY_RESUMES: &str = "relay.gateway.resumes";
+const ACTIVE_BOTS: &str = "relay.active_bots";
 
 /// The instruments plus the provider that owns them. Created once by [`init`] and
 /// stored in [`INSTRUMENTS`]; absence is the "metrics off" case. Keeping the

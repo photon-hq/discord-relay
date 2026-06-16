@@ -1,4 +1,4 @@
-# discord-middleman
+# discord-relay
 
 A small, always-on bridge that streams **Discord gateway events** into **Fusor**
 (and on to **Spectrum**). It opens a WebSocket to Discord for each configured
@@ -7,7 +7,7 @@ backoff), and forwards every dispatched event downstream over HTTP.
 
 ```
                  wss (gateway)             https (super-webhook)
-  Discord  ───────────────────▶  middleman ───────────────────▶  Fusor  ──▶  Spectrum
+  Discord  ───────────────────▶  relay     ───────────────────▶  Fusor  ──▶  Spectrum
                                      │
                                      ├─ resolves each project's slug via the
                                      │  Spectrum control plane (HTTP GET)
@@ -26,7 +26,7 @@ downtime.
 
 ## How it works
 
-For every bot in `config.json`, the middleman:
+For every bot in `config.json`, the relay:
 
 1. **Resolves the Spectrum slug.** It GETs the project from the Spectrum control
    plane (`{SPECTRUM_CLOUD_URL}/projects/{projectId}/`) using the project's
@@ -112,7 +112,7 @@ All secret fields are redacted in logs.
 | ------------------------ | ------------------------------- | ------------------------------------------------------------------------ |
 | `SPECTRUM_CLOUD_URL`     | `https://spectrum.photon.codes` | Base URL of the Spectrum control plane (slug resolution).                |
 | `SPECTRUM_SUPER_WEBHOOK` | `spctrm.dev`                    | Base domain of the Fusor super-webhook edge; URLs are `{slug}.{domain}`. |
-| `RUST_LOG`               | `info`                          | Log filter, e.g. `discord_middleman=debug,reqwest=warn`.                 |
+| `RUST_LOG`               | `info`                          | Log filter, e.g. `discord_relay=debug,reqwest=warn`.                 |
 | `LOG_FORMAT`             | human-readable                  | Set to `json` for one JSON object per line (ship to a log aggregator).   |
 | `FORWARD_SHARDS`         | `8`                             | Concurrent delivery lanes per bot (per-channel keyed). Floored at 1.     |
 | `FORWARD_BUFFER`         | `256`                           | Buffered events per lane before new events are dropped. Floored at 1.    |
@@ -125,15 +125,15 @@ Prometheus `/metrics` endpoint. Series (most labeled by `project_id`):
 
 | Metric                                | Type      | Meaning                                          |
 | ------------------------------------- | --------- | ------------------------------------------------ |
-| `middleman_events_received_total`     | counter   | Dispatch events queued for delivery.             |
-| `middleman_events_forwarded_total`    | counter   | Events delivered downstream successfully.        |
-| `middleman_events_dropped_total`      | counter   | Events dropped due to a saturated lane.          |
-| `middleman_forward_failures_total`    | counter   | Forwards that failed after exhausting retries.   |
-| `middleman_forward_retries_total`     | counter   | Retry attempts across all forwards.              |
-| `middleman_forward_latency_seconds`   | histogram | Per-forward latency (including retries).         |
-| `middleman_gateway_reconnects_total`  | counter   | Fresh reconnects / re-identifies.                |
-| `middleman_gateway_resumes_total`     | counter   | Session resumes after a drop.                    |
-| `middleman_active_bots`               | gauge     | Bots currently supervised.                       |
+| `relay_events_received_total`         | counter   | Dispatch events queued for delivery.             |
+| `relay_events_forwarded_total`        | counter   | Events delivered downstream successfully.        |
+| `relay_events_dropped_total`          | counter   | Events dropped due to a saturated lane.          |
+| `relay_forward_failures_total`        | counter   | Forwards that failed after exhausting retries.   |
+| `relay_forward_retries_total`         | counter   | Retry attempts across all forwards.              |
+| `relay_forward_latency_seconds`       | histogram | Per-forward latency (including retries).         |
+| `relay_gateway_reconnects_total`      | counter   | Fresh reconnects / re-identifies.                |
+| `relay_gateway_resumes_total`         | counter   | Session resumes after a drop.                    |
+| `relay_active_bots`                   | gauge     | Bots currently supervised.                       |
 
 ## Running
 

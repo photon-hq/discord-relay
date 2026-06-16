@@ -1,6 +1,6 @@
 //! Forwarding of Discord gateway events to a downstream fusor url.
 //!
-//! The middleman receives a [`crate::model::Client`] describing where events
+//! The relay receives a [`crate::model::Client`] describing where events
 //! should be delivered (e.g. `https://<slug>.spectrm.dev/discord`) along with
 //! the user-defined `webhookSecret`. [`WebhookClient`] wraps a pooled HTTP
 //! client and posts JSON payloads to that endpoint, attaching the secret on
