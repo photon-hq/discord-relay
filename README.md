@@ -48,7 +48,7 @@ For every bot in `config.json`, the middleman:
    heartbeats (which would get the bot dropped as a zombie). See
    [`src/dispatch.rs`](src/dispatch.rs) and [`src/webhook.rs`](src/webhook.rs).
 
-Each bot is fully independent — N bots means N supervisors on the shared Tokio
+Each bot is fully independent where N bots means N supervisors on the shared Tokio
 runtime, all sharing a single HTTP connection pool. Every log line is tagged with
 the bot's `projectId` so concurrent bots stay distinguishable.
 
@@ -137,7 +137,7 @@ Prometheus `/metrics` endpoint. Series (most labeled by `project_id`):
 
 ## Running
 
-Requires a recent Rust toolchain (the crate uses edition 2024).
+Requires a recent Rust toolchain (using edition 2024).
 
 ```sh
 # build
@@ -155,11 +155,11 @@ cargo test
 
 ## Project layout
 
-| Path                 | Responsibility                                                          |
+| Path                 | Responsibility                                                         |
 | -------------------- | ---------------------------------------------------------------------- |
 | `src/main.rs`        | Entry point: init, build shared HTTP client, signal/reload loop.       |
 | `src/supervisor.rs`  | Bot lifecycle: drive each bot, diff config on reload, graceful stop.   |
-| `src/model.rs`       | `Config` / `Client` types (with secret redaction).                     |
+| `src/model.rs`       | `Config` / `Client` types.                                             |
 | `src/discord/wss.rs` | Discord gateway supervisor: connect, heartbeat, resume, dispatch.      |
 | `src/dispatch.rs`    | Per-channel sharded delivery lanes (ordering + concurrency).           |
 | `src/spectrum.rs`    | Spectrum control-plane client (project slug resolution).               |
