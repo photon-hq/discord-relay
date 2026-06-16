@@ -15,5 +15,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 veil = "0.3.0"
 dotenvy = "0.15.7"
 tokio-util = { version = "0.7.18", default-features = false }
-metrics = "0.24.6"
-metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"] }
+opentelemetry = { version = "0.32", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.32", features = ["metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "metrics"] }

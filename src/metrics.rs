@@ -1,156 +1,204 @@
-//! Optional Prometheus metrics.
+//! Optional OpenTelemetry metrics.
 //!
-//! Instrumentation is wired in unconditionally via the [`metrics`] facade, but a
-//! recorder is only installed when `METRICS_ADDR` is set. With no recorder
-//! installed every `counter!`/`histogram!`/`gauge!` call is a cheap no-op, so
-//! the default (unset) deployment pays effectively nothing.
+//! Instrumentation is wired in unconditionally through this module's thin
+//! wrappers, but the instruments are only created when an OTLP endpoint is
+//! configured. With metrics disabled (the default) every helper is a cheap early
+//! return, so an unconfigured deployment pays effectively nothing.
 //!
-//! When `METRICS_ADDR` (e.g. `0.0.0.0:9100`) is set, [`init`] installs the
-//! Prometheus recorder and spawns its built-in HTTP listener, exposing the usual
-//! `/metrics` scrape endpoint. Call it once, after the Tokio runtime is up.
+//! When `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `http://localhost:4317`) is set,
+//! [`init`] builds an OTLP/gRPC exporter, installs a meter provider with a
+//! periodic reader, and creates the instruments. Measurements are then pushed to
+//! the configured collector on the reader's interval. Call it once, after the
+//! Tokio runtime is up, and call [`shutdown`] on exit to flush anything still
+//! buffered.
 //!
-//! Most series are labeled with the bot's `project_id` so per-bot behaviour stays
+//! Most series carry the bot's `project_id` attribute so per-bot behaviour stays
 //! distinguishable in aggregated dashboards.
 
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
-use metrics::{counter, gauge, histogram};
-use metrics_exporter_prometheus::PrometheusBuilder;
-use tracing::{error, info, warn};
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Gauge, Histogram, MeterProvider};
+use opentelemetry_otlp::{MetricExporter, WithExportConfig};
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
+use tracing::{error, info};
 
-/// Set once a recorder is installed. While false (the default, with
-/// `METRICS_ADDR` unset) every helper is a cheap early return, avoiding the
-/// per-call label `to_owned()` the `metrics` macros would otherwise perform on
-/// the hot path.
-static ENABLED: AtomicBool = AtomicBool::new(false);
+/// Environment variable selecting the OTLP collector endpoint. Unset (or empty)
+/// disables metrics entirely. Once an endpoint is configured the SDK also honours
+/// the other standard `OTEL_*` variables (headers, protocol, timeout, …).
+const OTLP_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 
-/// Whether metrics are being recorded.
-fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+/// Logical service name reported as a resource attribute on every metric.
+const SERVICE_NAME: &str = "discord-middleman";
+
+// Instrument names. OpenTelemetry uses dotted namespaces and derives the
+// monotonic `_total` suffix at export time, so unlike the old Prometheus names
+// these carry no `_total`. The latency series is a histogram in seconds.
+const EVENTS_RECEIVED: &str = "middleman.events.received";
+const EVENTS_FORWARDED: &str = "middleman.events.forwarded";
+const EVENTS_DROPPED: &str = "middleman.events.dropped";
+const FORWARD_FAILURES: &str = "middleman.forward.failures";
+const FORWARD_RETRIES: &str = "middleman.forward.retries";
+const FORWARD_LATENCY: &str = "middleman.forward.latency";
+const GATEWAY_RECONNECTS: &str = "middleman.gateway.reconnects";
+const GATEWAY_RESUMES: &str = "middleman.gateway.resumes";
+const ACTIVE_BOTS: &str = "middleman.active_bots";
+
+/// The instruments plus the provider that owns them. Created once by [`init`] and
+/// stored in [`INSTRUMENTS`]; absence is the "metrics off" case. Keeping the
+/// provider here both keeps the exporter alive and gives [`shutdown`] something to
+/// flush.
+struct Metrics {
+    events_received: Counter<u64>,
+    events_forwarded: Counter<u64>,
+    events_dropped: Counter<u64>,
+    forward_failures: Counter<u64>,
+    forward_retries: Counter<u64>,
+    forward_latency: Histogram<f64>,
+    gateway_reconnects: Counter<u64>,
+    gateway_resumes: Counter<u64>,
+    active_bots: Gauge<u64>,
+    provider: SdkMeterProvider,
 }
 
-/// Environment variable selecting the Prometheus listener bind address. Unset
-/// (or empty) disables metrics entirely.
-const METRICS_ADDR_ENV: &str = "METRICS_ADDR";
+static INSTRUMENTS: OnceLock<Metrics> = OnceLock::new();
 
-// Metric names. Counters end in `_total` per Prometheus convention; the latency
-// series is a histogram in seconds.
-const EVENTS_RECEIVED: &str = "middleman_events_received_total";
-const EVENTS_FORWARDED: &str = "middleman_events_forwarded_total";
-const EVENTS_DROPPED: &str = "middleman_events_dropped_total";
-const FORWARD_FAILURES: &str = "middleman_forward_failures_total";
-const FORWARD_RETRIES: &str = "middleman_forward_retries_total";
-const FORWARD_LATENCY: &str = "middleman_forward_latency_seconds";
-const GATEWAY_RECONNECTS: &str = "middleman_gateway_reconnects_total";
-const GATEWAY_RESUMES: &str = "middleman_gateway_resumes_total";
-const ACTIVE_BOTS: &str = "middleman_active_bots";
+/// Tag a measurement with the originating bot's project.
+fn project(project_id: &str) -> [KeyValue; 1] {
+    [KeyValue::new("project_id", project_id.to_owned())]
+}
 
-/// Install the Prometheus recorder + HTTP listener if `METRICS_ADDR` is set.
+/// Install the OpenTelemetry meter provider + OTLP exporter if an endpoint is set.
 ///
-/// A missing/empty var is the normal "metrics off" case and is logged at debug
-/// level only. A set-but-unusable value (bad address, bind failure) is warned
-/// about but never fatal — losing metrics must not take the service down.
+/// A missing/empty `OTEL_EXPORTER_OTLP_ENDPOINT` is the normal "metrics off" case
+/// and is logged at info level only. A set-but-unusable value (exporter build
+/// failure) is reported but never fatal — losing metrics must not take the
+/// service down.
 pub fn init() {
-    let addr = match std::env::var(METRICS_ADDR_ENV) {
+    let endpoint = match std::env::var(OTLP_ENDPOINT_ENV) {
         Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
         _ => {
-            info!("METRICS_ADDR unset; Prometheus metrics disabled");
+            info!("OTEL_EXPORTER_OTLP_ENDPOINT unset; OpenTelemetry metrics disabled");
             return;
         }
     };
 
-    let socket: SocketAddr = match addr.parse() {
-        Ok(socket) => socket,
-        Err(err) => {
-            warn!(error = %err, %addr, "invalid METRICS_ADDR; metrics disabled");
-            return;
-        }
-    };
-
-    match PrometheusBuilder::new()
-        .with_http_listener(socket)
-        .install()
+    let exporter = match MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()
     {
-        Ok(()) => {
-            ENABLED.store(true, Ordering::Relaxed);
-            info!(%socket, "serving Prometheus metrics at /metrics");
-        }
+        Ok(exporter) => exporter,
         Err(err) => {
-            error!(error = %err, %socket, "failed to start metrics listener; metrics disabled")
+            error!(error = %err, %endpoint, "failed to build OTLP metric exporter; metrics disabled");
+            return;
+        }
+    };
+
+    let provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
+        .with_resource(Resource::builder().with_service_name(SERVICE_NAME).build())
+        .build();
+
+    // Make the provider the process-wide default so any transitive library
+    // instrumentation reports through the same exporter.
+    opentelemetry::global::set_meter_provider(provider.clone());
+
+    let meter = provider.meter(SERVICE_NAME);
+    let metrics = Metrics {
+        events_received: meter.u64_counter(EVENTS_RECEIVED).build(),
+        events_forwarded: meter.u64_counter(EVENTS_FORWARDED).build(),
+        events_dropped: meter.u64_counter(EVENTS_DROPPED).build(),
+        forward_failures: meter.u64_counter(FORWARD_FAILURES).build(),
+        forward_retries: meter.u64_counter(FORWARD_RETRIES).build(),
+        forward_latency: meter.f64_histogram(FORWARD_LATENCY).with_unit("s").build(),
+        gateway_reconnects: meter.u64_counter(GATEWAY_RECONNECTS).build(),
+        gateway_resumes: meter.u64_counter(GATEWAY_RESUMES).build(),
+        active_bots: meter.u64_gauge(ACTIVE_BOTS).build(),
+        provider,
+    };
+
+    if INSTRUMENTS.set(metrics).is_err() {
+        error!("OpenTelemetry metrics already initialised");
+        return;
+    }
+    info!(%endpoint, "exporting OpenTelemetry metrics via OTLP/gRPC");
+}
+
+/// Flush and shut down the exporter, draining any buffered measurements. A no-op
+/// when metrics were never enabled. Call once during graceful shutdown.
+pub fn shutdown() {
+    if let Some(m) = INSTRUMENTS.get() {
+        if let Err(err) = m.provider.shutdown() {
+            error!(error = %err, "failed to flush OpenTelemetry metrics on shutdown");
         }
     }
 }
 
 /// An event was received from the gateway and queued for delivery.
 pub fn event_received(project_id: &str) {
-    if !enabled() {
-        return;
+    if let Some(m) = INSTRUMENTS.get() {
+        m.events_received.add(1, &project(project_id));
     }
-    counter!(EVENTS_RECEIVED, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// An event was successfully delivered downstream.
 pub fn event_forwarded(project_id: &str) {
-    if !enabled() {
-        return;
+    if let Some(m) = INSTRUMENTS.get() {
+        m.events_forwarded.add(1, &project(project_id));
     }
-    counter!(EVENTS_FORWARDED, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// An event was dropped because its delivery lane was saturated.
 pub fn event_dropped(project_id: &str) {
-    if !enabled() {
-        return;
+    if let Some(m) = INSTRUMENTS.get() {
+        m.events_dropped.add(1, &project(project_id));
     }
-    counter!(EVENTS_DROPPED, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// A forward attempt ultimately failed (all retries exhausted or permanent).
 pub fn forward_failure(project_id: &str) {
-    if !enabled() {
-        return;
+    if let Some(m) = INSTRUMENTS.get() {
+        m.forward_failures.add(1, &project(project_id));
     }
-    counter!(FORWARD_FAILURES, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// Record `n` retries performed for a single forward (0 if it succeeded first
 /// try). A no-op when `n` is 0.
 pub fn forward_retries(project_id: &str, n: u64) {
-    if !enabled() || n == 0 {
+    if n == 0 {
         return;
     }
-    counter!(FORWARD_RETRIES, "project_id" => project_id.to_owned()).increment(n);
+    if let Some(m) = INSTRUMENTS.get() {
+        m.forward_retries.add(n, &project(project_id));
+    }
 }
 
 /// Observe the wall-clock latency of a completed forward (including retries).
 pub fn forward_latency(project_id: &str, secs: f64) {
-    if !enabled() {
-        return;
+    if let Some(m) = INSTRUMENTS.get() {
+        m.forward_latency.record(secs, &project(project_id));
     }
-    histogram!(FORWARD_LATENCY, "project_id" => project_id.to_owned()).record(secs);
 }
 
 /// The gateway reconnected after a transient connection error.
 pub fn gateway_reconnect(project_id: &str) {
-    if !enabled() {
-        return;
+    if let Some(m) = INSTRUMENTS.get() {
+        m.gateway_reconnects.add(1, &project(project_id));
     }
-    counter!(GATEWAY_RECONNECTS, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// The gateway resumed an existing session.
 pub fn gateway_resume(project_id: &str) {
-    if !enabled() {
-        return;
+    if let Some(m) = INSTRUMENTS.get() {
+        m.gateway_resumes.add(1, &project(project_id));
     }
-    counter!(GATEWAY_RESUMES, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// Set the number of bots currently supervised.
 pub fn set_active_bots(n: usize) {
-    if !enabled() {
-        return;
+    if let Some(m) = INSTRUMENTS.get() {
+        m.active_bots.record(n as u64, &[]);
     }
-    gauge!(ACTIVE_BOTS).set(n as f64);
 }

@@ -71,6 +71,7 @@ async fn main() {
     }
 
     supervisor.shutdown().await;
+    metrics::shutdown();
 }
 
 /// Read and parse `config.json` from the working directory. Returns `None` on any
