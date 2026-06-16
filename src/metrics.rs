@@ -129,10 +129,10 @@ pub fn init() {
 /// Flush and shut down the exporter, draining any buffered measurements. A no-op
 /// when metrics were never enabled. Call once during graceful shutdown.
 pub fn shutdown() {
-    if let Some(m) = INSTRUMENTS.get() {
-        if let Err(err) = m.provider.shutdown() {
-            error!(error = %err, "failed to flush OpenTelemetry metrics on shutdown");
-        }
+    if let Some(m) = INSTRUMENTS.get()
+        && let Err(err) = m.provider.shutdown()
+    {
+        error!(error = %err, "failed to flush OpenTelemetry metrics on shutdown");
     }
 }
 
