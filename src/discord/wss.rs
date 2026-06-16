@@ -44,10 +44,12 @@ const GATEWAY_QUERY: &str = "?v=10&encoding=json";
 /// enabled for the application in the Discord developer portal, or Identify is
 /// rejected with a `4014` close code.
 ///
-/// * `GUILD_MESSAGES`   `1 << 9`
-/// * `DIRECT_MESSAGES`  `1 << 12`
-/// * `MESSAGE_CONTENT`  `1 << 15`
-const INTENTS: u64 = (1 << 9) | (1 << 12) | (1 << 15);
+/// * `GUILD_MESSAGES`        `1 << 9`
+/// * `DIRECT_MESSAGES`       `1 << 12`
+/// * `MESSAGE_CONTENT`       `1 << 15`
+/// * `GUILD_MESSAGE_POLLS`   `1 << 24`
+/// * `DIRECT_MESSAGE_POLLS`  `1 << 25`
+const INTENTS: u64 = (1 << 9) | (1 << 12) | (1 << 15) | (1 << 24) | (1 << 25);
 
 /// Gateway opcodes. See the Discord gateway documentation.
 mod op {
@@ -358,22 +360,31 @@ where
         }
     }
 
-    /// Forward an event's data downstream — only the `d` payload as the body,
-    /// never the op/seq envelope. The event type (`t`) is carried alongside so
-    /// the forwarder can tag it on the request. Hands off to the [`Dispatcher`],
-    /// which routes by channel and never blocks the gateway read loop.
+    /// Forward an event downstream as the full gateway frame — the
+    /// `{ op, t, s, d }` envelope, verbatim:
+    ///
+    /// | Field | Meaning         | Notes                                                      |
+    /// |-------|-----------------|------------------------------------------------------------|
+    /// | `op`  | opcode          | `0` for a dispatch; downstream only ever sees dispatches   |
+    /// | `t`   | event type name | e.g. `"MESSAGE_CREATE"`                                     |
+    /// | `s`   | sequence number | the gateway sequence for this event                        |
+    /// | `d`   | event data      | the actual payload object (the message, the reaction, etc.)|
+    ///
+    /// The event type (`t`) is also carried in the `X-Discord-Event` header so
+    /// downstream clients can route without parsing the body. Hands off to the
+    /// [`Dispatcher`], which routes by channel and never blocks the gateway read
+    /// loop.
     fn dispatch(&self, v: Value) {
-        let Value::Object(mut obj) = v else { return };
-        let name = obj
+        let name = v
             .get("t")
             .and_then(Value::as_str)
             .unwrap_or("UNKNOWN")
             .to_string();
-        let Some(data) = obj.remove("d") else { return };
-        if data.is_null() {
+        // Nothing to deliver if the frame carries no `d` payload.
+        if v.get("d").is_none_or(Value::is_null) {
             return;
         }
-        self.dispatcher.enqueue(name, data);
+        self.dispatcher.enqueue(name, v);
     }
 
     /// Send a heartbeat (op 1) carrying the last sequence number and mark the
