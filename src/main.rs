@@ -1,5 +1,4 @@
 mod discord;
-mod dispatch;
 mod logging;
 mod metrics;
 mod model;
@@ -21,7 +20,6 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[tokio::main]
 async fn main() {
-    
     let _ = dotenvy::dotenv();
 
     logging::init();

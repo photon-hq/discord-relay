@@ -28,7 +28,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::dispatch::Dispatcher;
+use super::dispatch::Dispatcher;
 use crate::metrics;
 use crate::model::Client;
 use crate::webhook::WebhookClient;
