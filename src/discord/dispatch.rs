@@ -48,9 +48,9 @@ const SHARDS_ENV: &str = "FORWARD_SHARDS";
 const BUFFER_ENV: &str = "FORWARD_BUFFER";
 
 /// One dispatch event queued for downstream delivery: the gateway event name
-/// (the envelope's `t`, e.g. `MESSAGE_CREATE`) plus the `d` payload. The `d`
-/// payload is the request body; the name is forwarded in the `X-Discord-Event`
-/// header (and tags the delivery logs).
+/// (the envelope's `t`, e.g. `MESSAGE_CREATE`) plus the full gateway frame
+/// (`{ op, t, s, d }`). The frame is the request body; the name is also
+/// forwarded in the `X-Discord-Event` header (and tags the delivery logs).
 struct ForwardEvent {
     name: String,
     data: Value,
@@ -84,7 +84,8 @@ impl Dispatcher {
         Self { lanes, project_id }
     }
 
-    /// Queue `data` (the event's `d` payload) for delivery, ordered per channel.
+    /// Queue `data` (the full `{ op, t, s, d }` gateway frame) for delivery,
+    /// ordered per channel.
     ///
     /// Non-blocking: if the target lane is saturated the event is dropped rather
     /// than stalling the gateway read loop, and the drop is counted so saturation
@@ -141,11 +142,14 @@ fn shard_for(data: &Value, lanes: usize) -> usize {
 }
 
 /// The value events are ordered by: a channel where present, else the guild.
-/// Both are Discord snowflake strings.
+/// Both are Discord snowflake strings and live inside the frame's `d` payload;
+/// a frame without a `d` object (or a bare payload) is keyed off its top level.
 fn routing_key(data: &Value) -> Option<&str> {
-    data.get("channel_id")
+    let payload = data.get("d").filter(|d| d.is_object()).unwrap_or(data);
+    payload
+        .get("channel_id")
         .and_then(Value::as_str)
-        .or_else(|| data.get("guild_id").and_then(Value::as_str))
+        .or_else(|| payload.get("guild_id").and_then(Value::as_str))
 }
 
 /// Deterministic hash of a routing key. [`DefaultHasher`] uses fixed keys, so
@@ -180,20 +184,27 @@ mod tests {
 
     #[test]
     fn routes_by_channel_then_guild() {
-        let by_channel = json!({ "channel_id": "111", "guild_id": "999" });
+        // Keys live inside the frame's `d` payload.
+        let by_channel =
+            json!({ "t": "MESSAGE_CREATE", "d": { "channel_id": "111", "guild_id": "999" } });
         assert_eq!(routing_key(&by_channel), Some("111"));
 
-        let by_guild = json!({ "guild_id": "999" });
+        let by_guild = json!({ "t": "GUILD_UPDATE", "d": { "guild_id": "999" } });
         assert_eq!(routing_key(&by_guild), Some("999"));
 
-        let keyless = json!({ "user": { "id": "5" } });
+        let keyless = json!({ "t": "TYPING_START", "d": { "user": { "id": "5" } } });
         assert_eq!(routing_key(&keyless), None);
+
+        // A bare payload (no `d` envelope) is keyed off its top level.
+        let bare = json!({ "channel_id": "222" });
+        assert_eq!(routing_key(&bare), Some("222"));
     }
 
     #[test]
     fn same_channel_maps_to_same_lane() {
-        let a = json!({ "channel_id": "12345", "content": "hi" });
-        let b = json!({ "channel_id": "12345", "content": "there" });
+        let a = json!({ "t": "MESSAGE_CREATE", "d": { "channel_id": "12345", "content": "hi" } });
+        let b =
+            json!({ "t": "MESSAGE_UPDATE", "d": { "channel_id": "12345", "content": "there" } });
         assert_eq!(shard_for(&a, 8), shard_for(&b, 8));
     }
 

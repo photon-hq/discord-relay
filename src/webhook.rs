@@ -18,10 +18,9 @@ use veil::Redact;
 const WEBHOOK_SECRET_HEADER: &str = "X-Webhook-Secret";
 
 /// HTTP header carrying the Discord gateway event name (the envelope's `t`,
-/// e.g. `MESSAGE_CREATE`). The body is still the raw `d` payload, but those
-/// payloads are near-identical across `MESSAGE_CREATE`/`MESSAGE_UPDATE`/
-/// `MESSAGE_DELETE`, so the type is forwarded here to keep them distinguishable
-/// downstream.
+/// e.g. `MESSAGE_CREATE`). The body is the full `{ op, t, s, d }` gateway frame,
+/// so the type is also available there; this header lets downstream clients
+/// route on the event type without parsing the body.
 const DISCORD_EVENT_HEADER: &str = "X-Discord-Event";
 
 /// Default per-request timeout. Forwarding should be fast; a hung downstream
