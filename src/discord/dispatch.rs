@@ -185,7 +185,8 @@ mod tests {
     #[test]
     fn routes_by_channel_then_guild() {
         // Keys live inside the frame's `d` payload.
-        let by_channel = json!({ "t": "MESSAGE_CREATE", "d": { "channel_id": "111", "guild_id": "999" } });
+        let by_channel =
+            json!({ "t": "MESSAGE_CREATE", "d": { "channel_id": "111", "guild_id": "999" } });
         assert_eq!(routing_key(&by_channel), Some("111"));
 
         let by_guild = json!({ "t": "GUILD_UPDATE", "d": { "guild_id": "999" } });
@@ -202,7 +203,8 @@ mod tests {
     #[test]
     fn same_channel_maps_to_same_lane() {
         let a = json!({ "t": "MESSAGE_CREATE", "d": { "channel_id": "12345", "content": "hi" } });
-        let b = json!({ "t": "MESSAGE_UPDATE", "d": { "channel_id": "12345", "content": "there" } });
+        let b =
+            json!({ "t": "MESSAGE_UPDATE", "d": { "channel_id": "12345", "content": "there" } });
         assert_eq!(shard_for(&a, 8), shard_for(&b, 8));
     }
 
