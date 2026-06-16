@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
+use veil::Redact;
 
 /// Default base URL of the Spectrum cloud control plane. This is the only
 /// baked-in default — override per-environment via [`SPECTRUM_CLOUD_URL_ENV`]
@@ -119,11 +120,12 @@ struct ProjectData {
 /// A client for a single Spectrum project's control-plane operations.
 ///
 /// Cheap to [`clone`](Clone) — the underlying connection pool is shared.
-#[derive(Debug, Clone)]
+#[derive(Redact, Clone)]
 pub struct SpectrumClient {
     http: Client,
     base_url: String,
     project_id: String,
+    #[redact(fixed = 8)]
     project_secret: String,
 }
 

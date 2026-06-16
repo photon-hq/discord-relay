@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use reqwest::{Client, StatusCode, Url};
 use serde::Serialize;
+use veil::Redact;
 
 /// HTTP header used to authenticate forwarded requests against the downstream
 /// endpoint. The downstream service is expected to compare this against the
@@ -123,10 +124,11 @@ mod url_error {
 ///
 /// Cheap to [`clone`](Clone) — the underlying connection pool is shared, so a
 /// single instance can be handed to many concurrent tasks.
-#[derive(Debug, Clone)]
+#[derive(Redact, Clone)]
 pub struct WebhookClient {
     http: Client,
     url: Url,
+    #[redact(fixed = 8)]
     secret: String,
     max_attempts: u32,
     backoff_base: Duration,

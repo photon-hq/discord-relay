@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use veil::Redact;
 
 /// Top-level configuration read from `config.json`.
@@ -16,7 +16,7 @@ use veil::Redact;
 ///   ]
 /// }
 /// ```
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     /// The bots to run, one supervisor per entry.
     pub bots: Vec<Client>,
@@ -33,9 +33,11 @@ pub struct Config {
 ///   "botToken": "discordbottoken"
 /// }
 /// ```
-/// Secret fields are redacted so they don't leak sensitive data
-/// when the `Client` is logged.
-#[derive(Clone, Serialize, Deserialize, Redact)]
+/// Secret fields are redacted so they don't leak sensitive data when the
+/// `Client` is logged. It deliberately does *not* derive `Serialize`: the redact
+/// only covers the `Debug` impl, so a serialize path would re-emit the secrets
+/// in cleartext.
+#[derive(Clone, Deserialize, Redact)]
 #[serde(rename_all = "camelCase")]
 pub struct Client {
     /// User-defined secret used to authenticate incoming webhook calls.
