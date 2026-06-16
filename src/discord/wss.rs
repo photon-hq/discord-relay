@@ -24,8 +24,9 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::dispatch::Dispatcher;
 use crate::metrics;
@@ -111,22 +112,34 @@ async fn run(client: Client, webhook: WebhookClient, token: CancellationToken) {
         };
 
         match outcome {
-            // Clean signal to reconnect with the existing session.
+            // Clean signal to reconnect with the existing session. A connection
+            // that became healthy reset the backoff inside `pump` (on
+            // READY/RESUMED); one that closed before then leaves it grown, so a
+            // connection that immediately drops can't spin in a tight loop.
             Ok(Disconnect::Resume) => {
                 debug!("connection ended; will resume existing session");
                 metrics::gateway_resume(&client.project_id);
-                backoff.reset();
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = backoff.sleep() => {}
+                }
             }
-            // Session is dead; drop it and Identify fresh after a short wait.
+            // Session is dead; drop it and Identify fresh after a backoff wait.
             Ok(Disconnect::Reidentify) => {
                 info!("session invalidated; re-identifying with a fresh session");
                 metrics::gateway_reconnect(&client.project_id);
                 session = None;
-                backoff.reset();
                 tokio::select! {
                     _ = token.cancelled() => break,
-                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    _ = backoff.sleep() => {}
                 }
+            }
+            // Unrecoverable: the gateway rejected us for good (bad token,
+            // disallowed intents, ...). Reconnecting would loop forever and risk
+            // a ban, so stop the supervisor and surface the reason.
+            Ok(Disconnect::Fatal(reason)) => {
+                error!(%reason, "gateway reported an unrecoverable condition; stopping bot");
+                break;
             }
             // Transient failure: keep the session so the next attempt resumes,
             // and grow the backoff to avoid hammering the gateway.
@@ -148,8 +161,12 @@ async fn run(client: Client, webhook: WebhookClient, token: CancellationToken) {
 enum Disconnect {
     /// Reconnect and resume the existing session (op 7, zombie, socket close).
     Resume,
-    /// Session is unrecoverable; reconnect with a fresh Identify (op 9, false).
+    /// Session is unrecoverable; reconnect with a fresh Identify (op 9, false,
+    /// or a session-invalidating close code).
     Reidentify,
+    /// The gateway rejected the connection for an unrecoverable reason (e.g.
+    /// authentication failed or disallowed intents); stop the supervisor.
+    Fatal(String),
 }
 
 /// What to do after handling one decoded frame.
@@ -265,7 +282,7 @@ where
                             Flow::Beat => self.send_heartbeat().await?,
                             Flow::End(d) => return Ok(d),
                         },
-                        Message::Close(_) => return Ok(Disconnect::Resume),
+                        Message::Close(frame) => return Ok(classify_close(frame.as_ref())),
                         // Ping/Pong are handled by tungstenite; binary is unused.
                         _ => {}
                     }
@@ -286,20 +303,30 @@ where
                 }
                 match v["t"].as_str() {
                     Some("READY") => {
-                        let id = v["d"]["session_id"]
+                        let id = v["d"]["session_id"].as_str().filter(|s| !s.is_empty());
+                        let resume_url = v["d"]["resume_gateway_url"]
                             .as_str()
-                            .unwrap_or_default()
-                            .to_string();
-                        info!(session_id = %id, "gateway session established (READY)");
-                        *self.session = Some(Session {
-                            id,
-                            resume_url: v["d"]["resume_gateway_url"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_string(),
-                            seq: self.seq,
-                        });
-                        self.backoff.reset();
+                            .filter(|s| !s.is_empty());
+                        match (id, resume_url) {
+                            (Some(id), Some(resume_url)) => {
+                                info!(session_id = %id, "gateway session established (READY)");
+                                *self.session = Some(Session {
+                                    id: id.to_string(),
+                                    resume_url: resume_url.to_string(),
+                                    seq: self.seq,
+                                });
+                                self.backoff.reset();
+                            }
+                            // Without both fields we could never resume this
+                            // session; bail so the supervisor reconnects with a
+                            // fresh Identify instead of storing an unusable
+                            // (empty) session that wedges every later resume.
+                            _ => {
+                                return Err(
+                                    "READY missing session_id or resume_gateway_url".into()
+                                );
+                            }
+                        }
                     }
                     Some("RESUMED") => {
                         info!("gateway session resumed");
@@ -359,6 +386,28 @@ where
             .await?;
         self.awaiting_ack = true;
         Ok(())
+    }
+}
+
+/// Map a gateway close frame to the appropriate reconnect disposition.
+///
+/// Discord signals unrecoverable conditions with close codes in the 4000 range:
+/// `4004` (authentication failed), `4010`/`4011` (invalid/required sharding),
+/// `4012` (invalid API version), and `4013`/`4014` (invalid/disallowed intents)
+/// are fatal — reconnecting would loop forever and risk a ban. `4007` (invalid
+/// seq) and `4009` (session timed out) invalidate the session and need a fresh
+/// Identify. Everything else (including a missing close frame) is a resumable
+/// drop.
+fn classify_close(frame: Option<&CloseFrame>) -> Disconnect {
+    let Some(frame) = frame else {
+        return Disconnect::Resume;
+    };
+    match u16::from(frame.code) {
+        4004 | 4010 | 4011 | 4012 | 4013 | 4014 => {
+            Disconnect::Fatal(format!("close code {}: {}", u16::from(frame.code), frame.reason))
+        }
+        4007 | 4009 => Disconnect::Reidentify,
+        _ => Disconnect::Resume,
     }
 }
 
@@ -434,5 +483,48 @@ impl Backoff {
         let delay = self.current;
         self.current = (self.current * 2).min(Self::MAX);
         tokio::time::sleep(delay).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+    fn close(code: u16) -> Option<CloseFrame> {
+        Some(CloseFrame {
+            code: CloseCode::from(code),
+            reason: "test".into(),
+        })
+    }
+
+    #[test]
+    fn fatal_close_codes_stop_the_bot() {
+        for code in [4004, 4010, 4011, 4012, 4013, 4014] {
+            assert!(
+                matches!(classify_close(close(code).as_ref()), Disconnect::Fatal(_)),
+                "close code {code} should be fatal"
+            );
+        }
+    }
+
+    #[test]
+    fn session_invalidating_codes_reidentify() {
+        for code in [4007, 4009] {
+            assert!(
+                matches!(classify_close(close(code).as_ref()), Disconnect::Reidentify),
+                "close code {code} should re-identify"
+            );
+        }
+    }
+
+    #[test]
+    fn other_closes_resume() {
+        assert!(matches!(
+            classify_close(close(4000).as_ref()),
+            Disconnect::Resume
+        ));
+        // A close with no frame is also a plain resumable drop.
+        assert!(matches!(classify_close(None), Disconnect::Resume));
     }
 }
