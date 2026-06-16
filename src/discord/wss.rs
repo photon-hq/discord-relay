@@ -322,9 +322,7 @@ where
                             // fresh Identify instead of storing an unusable
                             // (empty) session that wedges every later resume.
                             _ => {
-                                return Err(
-                                    "READY missing session_id or resume_gateway_url".into()
-                                );
+                                return Err("READY missing session_id or resume_gateway_url".into());
                             }
                         }
                     }
@@ -403,9 +401,11 @@ fn classify_close(frame: Option<&CloseFrame>) -> Disconnect {
         return Disconnect::Resume;
     };
     match u16::from(frame.code) {
-        4004 | 4010 | 4011 | 4012 | 4013 | 4014 => {
-            Disconnect::Fatal(format!("close code {}: {}", u16::from(frame.code), frame.reason))
-        }
+        4004 | 4010 | 4011 | 4012 | 4013 | 4014 => Disconnect::Fatal(format!(
+            "close code {}: {}",
+            u16::from(frame.code),
+            frame.reason
+        )),
         4007 | 4009 => Disconnect::Reidentify,
         _ => Disconnect::Resume,
     }

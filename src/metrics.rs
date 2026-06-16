@@ -76,7 +76,9 @@ pub fn init() {
             ENABLED.store(true, Ordering::Relaxed);
             info!(%socket, "serving Prometheus metrics at /metrics");
         }
-        Err(err) => error!(error = %err, %socket, "failed to start metrics listener; metrics disabled"),
+        Err(err) => {
+            error!(error = %err, %socket, "failed to start metrics listener; metrics disabled")
+        }
     }
 }
 

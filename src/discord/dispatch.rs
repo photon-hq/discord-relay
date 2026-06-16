@@ -76,8 +76,7 @@ impl Dispatcher {
         for lane in 0..shards {
             let (tx, rx) = mpsc::channel::<ForwardEvent>(buffer);
             tokio::spawn(
-                worker(lane, rx, webhook.clone(), project_id.clone())
-                    .instrument(Span::current()),
+                worker(lane, rx, webhook.clone(), project_id.clone()).instrument(Span::current()),
             );
             lanes.push(tx);
         }

@@ -156,7 +156,12 @@ impl SpectrumClient {
             .timeout(DEFAULT_TIMEOUT)
             .build()
             .map_err(SpectrumError::Transport)?;
-        Ok(Self::with_client(http, base_url, project_id, project_secret))
+        Ok(Self::with_client(
+            http,
+            base_url,
+            project_id,
+            project_secret,
+        ))
     }
 
     /// Like [`with_base_url`](Self::with_base_url) but reuses an existing
