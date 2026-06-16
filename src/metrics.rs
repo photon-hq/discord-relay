@@ -13,10 +13,22 @@
 //! distinguishable in aggregated dashboards.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tracing::{error, info, warn};
+
+/// Set once a recorder is installed. While false (the default, with
+/// `METRICS_ADDR` unset) every helper is a cheap early return, avoiding the
+/// per-call label `to_owned()` the `metrics` macros would otherwise perform on
+/// the hot path.
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Whether metrics are being recorded.
+fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
 
 /// Environment variable selecting the Prometheus listener bind address. Unset
 /// (or empty) disables metrics entirely.
@@ -60,55 +72,83 @@ pub fn init() {
         .with_http_listener(socket)
         .install()
     {
-        Ok(()) => info!(%socket, "serving Prometheus metrics at /metrics"),
+        Ok(()) => {
+            ENABLED.store(true, Ordering::Relaxed);
+            info!(%socket, "serving Prometheus metrics at /metrics");
+        }
         Err(err) => error!(error = %err, %socket, "failed to start metrics listener; metrics disabled"),
     }
 }
 
 /// An event was received from the gateway and queued for delivery.
 pub fn event_received(project_id: &str) {
+    if !enabled() {
+        return;
+    }
     counter!(EVENTS_RECEIVED, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// An event was successfully delivered downstream.
 pub fn event_forwarded(project_id: &str) {
+    if !enabled() {
+        return;
+    }
     counter!(EVENTS_FORWARDED, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// An event was dropped because its delivery lane was saturated.
 pub fn event_dropped(project_id: &str) {
+    if !enabled() {
+        return;
+    }
     counter!(EVENTS_DROPPED, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// A forward attempt ultimately failed (all retries exhausted or permanent).
 pub fn forward_failure(project_id: &str) {
+    if !enabled() {
+        return;
+    }
     counter!(FORWARD_FAILURES, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// Record `n` retries performed for a single forward (0 if it succeeded first
 /// try). A no-op when `n` is 0.
 pub fn forward_retries(project_id: &str, n: u64) {
-    if n > 0 {
-        counter!(FORWARD_RETRIES, "project_id" => project_id.to_owned()).increment(n);
+    if !enabled() || n == 0 {
+        return;
     }
+    counter!(FORWARD_RETRIES, "project_id" => project_id.to_owned()).increment(n);
 }
 
 /// Observe the wall-clock latency of a completed forward (including retries).
 pub fn forward_latency(project_id: &str, secs: f64) {
+    if !enabled() {
+        return;
+    }
     histogram!(FORWARD_LATENCY, "project_id" => project_id.to_owned()).record(secs);
 }
 
 /// The gateway reconnected after a transient connection error.
 pub fn gateway_reconnect(project_id: &str) {
+    if !enabled() {
+        return;
+    }
     counter!(GATEWAY_RECONNECTS, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// The gateway resumed an existing session.
 pub fn gateway_resume(project_id: &str) {
+    if !enabled() {
+        return;
+    }
     counter!(GATEWAY_RESUMES, "project_id" => project_id.to_owned()).increment(1);
 }
 
 /// Set the number of bots currently supervised.
 pub fn set_active_bots(n: usize) {
+    if !enabled() {
+        return;
+    }
     gauge!(ACTIVE_BOTS).set(n as f64);
 }
