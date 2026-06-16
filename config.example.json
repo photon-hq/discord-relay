@@ -1,0 +1,16 @@
+{
+  "bots": [
+    {
+      "webhookSecret": "secretweb",
+      "projectId": "45c5371a-1f90-4ca9-2rtc-sr9ea4572721",
+      "projectSecret": "k8N4fL3xQ9mZ2wT7yP5vB1jC8dG6hX3rL9cK4vN7zM2",
+      "botToken": "MTgyNjM5NDgzOTI1OTM4MTc2.G3_x9A.dGhpc2lzYWZha2V0b2tlbmRvbm90dHJ5dG91c2VpdA"
+    },
+    {
+      "webhookSecret": "secretweb1",
+      "projectId": "57d2e115-87b9-49b2-8002-14e1b9f0a8c6",
+      "projectSecret": "9#qB*W2m7P!zL8vX4&kG9@yT3jR1cM5$hN6dF2^pB",
+      "botToken": "MTkyODQ3NTY0ODMxOTIzODQ3.Gz9A1b.xY_zW2-A9Bc_DeFgHiJkLmNoPqRsTuVwXyZ123"
+    }
+  ]
+}
