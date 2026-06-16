@@ -145,7 +145,7 @@ fn shard_for(data: &Value, lanes: usize) -> usize {
 /// Both are Discord snowflake strings and live inside the frame's `d` payload;
 /// a frame without a `d` object (or a bare payload) is keyed off its top level.
 fn routing_key(data: &Value) -> Option<&str> {
-    let payload = data.get("d").unwrap_or(data);
+    let payload = data.get("d").filter(|d| d.is_object()).unwrap_or(data);
     payload
         .get("channel_id")
         .and_then(Value::as_str)
