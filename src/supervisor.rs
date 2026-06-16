@@ -94,8 +94,16 @@ impl Supervisor {
 
         // Start everything not already running (new, or just stopped to restart).
         for (id, client) in desired {
-            if self.bots.contains_key(&id) {
-                continue; // unchanged, still running
+            // A handle whose task has finished is *not* running — the bot exited
+            // (e.g. slug resolution permanently rejected, build failure, panic).
+            // Drop the dead handle so it gets restarted instead of lingering as a
+            // zombie that reconcile mistakes for a live bot.
+            if let Some(handle) = self.bots.get(&id) {
+                if !handle.join.is_finished() {
+                    continue; // unchanged, still running
+                }
+                warn!(project_id = %id, "bot task had exited; restarting");
+                self.bots.remove(&id);
             }
             info!(project_id = %id, "starting bot");
             let cancel = CancellationToken::new();
@@ -193,25 +201,29 @@ async fn resolve_slug(http: &HttpClient, client: &Client) -> Option<String> {
 
     let mut backoff = SLUG_BACKOFF_BASE;
     loop {
-        match spectrum.get_project_slug().await {
+        let err = match spectrum.get_project_slug().await {
             Ok(slug) => return Some(slug),
-            // A non-success status (or a project with no slug) means the request
-            // itself is the problem (credentials / unknown / unconfigured
-            // project). Retrying is pointless.
-            Err(
-                err @ (spectrum::SpectrumError::Status { .. } | spectrum::SpectrumError::MissingSlug),
-            ) => {
-                error!(error = %err, "slug resolution rejected; check project credentials");
-                return None;
-            }
-            // Transport / URL issues may be transient: keep trying so a brief
-            // control-plane outage doesn't permanently sideline the bot.
-            Err(err) => {
-                warn!(error = %err, backoff = ?backoff, "slug resolution failed; retrying after backoff");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(SLUG_BACKOFF_MAX);
-            }
+            Err(err) => err,
+        };
+
+        // A 4xx (bad credentials / unknown / unconfigured project) or a missing
+        // slug means the request itself is the problem; retrying is pointless.
+        // A 5xx is a server-side hiccup and is retried like a transport error.
+        let permanent = match &err {
+            spectrum::SpectrumError::Status { status, .. } => !status.is_server_error(),
+            spectrum::SpectrumError::MissingSlug => true,
+            _ => false,
+        };
+        if permanent {
+            error!(error = %err, "slug resolution rejected; check project credentials");
+            return None;
         }
+
+        // Transport / URL / 5xx issues may be transient: keep trying so a brief
+        // control-plane outage doesn't permanently sideline the bot.
+        warn!(error = %err, backoff = ?backoff, "slug resolution failed; retrying after backoff");
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(SLUG_BACKOFF_MAX);
     }
 }
 
